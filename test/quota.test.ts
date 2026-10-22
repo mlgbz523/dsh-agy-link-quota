@@ -1041,5 +1041,54 @@ test('Argon model quota populates weeklyFraction when summary has no weekly argo
 })
 
 
+test('probeSubscriptionTier parses PRO, ULTRA, and FREE from loadCodeAssist payload', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-tier-probe-'))
+  const pool = new AccountPoolManager(dir)
+
+  class MockTierService extends QuotaService {
+    mockBody: any = {}
+    override async fetchCodeAssistEndpoint(): Promise<Response> {
+      return new Response(JSON.stringify(this.mockBody), { status: 200 })
+    }
+  }
+
+  const svc = new MockTierService(pool)
+
+  // 1. paidTier takes precedence
+  svc.mockBody = { paidTier: { id: 'PRO' }, currentTier: { id: 'FREE' } }
+  assert.equal(await svc.probeSubscriptionTier('fake'), 'PRO')
+
+  // 2. ULTRA resolution
+  svc.mockBody = { currentTier: { id: 'TIER_ULTRA' } }
+  assert.equal(await svc.probeSubscriptionTier('fake'), 'ULTRA')
+
+  // 3. allowedTiers fallback
+  svc.mockBody = { allowedTiers: [{ id: 'PRO' }] }
+  assert.equal(await svc.probeSubscriptionTier('fake'), 'PRO')
+
+  // 4. Default / unknown string -> FREE
+  svc.mockBody = { currentTier: { id: 'UNKNOWN_TIER' } }
+  assert.equal(await svc.probeSubscriptionTier('fake'), 'FREE')
+
+  // 5. Empty / missing -> FREE
+  svc.mockBody = {}
+  assert.equal(await svc.probeSubscriptionTier('fake'), 'FREE')
+})
+
+test('probeSubscriptionTier network failure returns undefined without throwing', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-tier-err-'))
+  const pool = new AccountPoolManager(dir)
+
+  class FailingTierService extends QuotaService {
+    override async fetchCodeAssistEndpoint(): Promise<Response> {
+      throw new Error('Connection refused')
+    }
+  }
+
+  const svc = new FailingTierService(pool)
+  const tier = await svc.probeSubscriptionTier('fake')
+  assert.equal(tier, undefined)
+})
+
 
 

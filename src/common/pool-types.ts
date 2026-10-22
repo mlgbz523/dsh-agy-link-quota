@@ -25,6 +25,8 @@ export interface ModelQuotaInfo {
   displayName?: string
   remainingFraction?: number
   resetTime?: string
+  /** Which upstream source produced this row (UI labels the caliber). */
+  source?: 'model' | 'summary'
 }
 
 export interface FamilyQuotaInfo {
@@ -42,6 +44,12 @@ export interface FamilyQuotaInfo {
   updatedAt?: number
   /** Optional model-level breakdown in this family. */
   models?: ModelQuotaInfo[]
+  /** Family-level subscription tier resolved from loadCodeAssist. */
+  subscriptionTier?: 'PRO' | 'ULTRA' | 'FREE'
+  /** When the tier was last authoritatively confirmed. */
+  tierProbedAt?: number
+  /** True when this family shares its pool with another family (3p-weekly). */
+  sharedWith?: ModelFamily[]
 }
 
 export interface FamilyCooldownState {

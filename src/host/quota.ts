@@ -26,6 +26,8 @@ import { AGY_ENDPOINTS, refreshTokens } from './oauth.ts'
 import { agyFetch } from './net.ts'
 import { detectSystemProxy } from './wincred.ts'
 import { parseCredentialDoc, credentialFingerprint, readPrimaryCredential, writePrimaryCredential } from './credential-slot.ts'
+import { EndpointHealthTracker } from './endpoint-health.ts'
+import { buildQuotaGroupViews } from '../common/quota-groups.ts'
 
 /**
  * When the quota-summary endpoint transiently fails, per-model fallback
@@ -373,6 +375,7 @@ export async function readWindowsCredentialToken(): Promise<StoredToken | null> 
 
 export class QuotaService {
   private preferredEndpointIndex = 0
+  private readonly healthTracker = new EndpointHealthTracker()
   /** accountId -> in-flight getValidAccessToken attempt (dedup). */
   private readonly tokenRefreshInFlight = new Map<string, Promise<string | null>>()
 
@@ -610,15 +613,20 @@ export class QuotaService {
   }
 
   /**
-   * Re-order endpoints so the preferred/working endpoint is tried first.
+   * Re-order endpoints so the preferred/working endpoint is tried first,
+   * respecting health tracking degradation (Antigravity-Manager parity).
    */
   private getOrderedEndpoints(): string[] {
     const total = AGY_ENDPOINTS.length
-    const ordered: string[] = []
+    const preferred: string[] = []
     for (let i = 0; i < total; i++) {
-      ordered.push(AGY_ENDPOINTS[(this.preferredEndpointIndex + i) % total]!)
+      preferred.push(AGY_ENDPOINTS[(this.preferredEndpointIndex + i) % total]!)
     }
-    return ordered
+    return this.healthTracker.order(preferred)
+  }
+
+  getEndpointHealth(): Record<string, { healthy: boolean; failedAt?: number }> {
+    return this.healthTracker.getSnapshot()
   }
 
   protected async fetchSummaryEndpoint(endpoint: string, accessToken: string, proxyUrl?: string): Promise<Response> {
@@ -645,6 +653,7 @@ export class QuotaService {
       try {
         const res = await this.fetchSummaryEndpoint(endpoint, accessToken, proxyUrl)
         if (res.ok) {
+          this.healthTracker.markSuccess(endpoint)
           const summary = (await res.json()) as QuotaSummaryResponse
           // Validate whether the summary contains the primary Gemini models group.
           // Older clients or endpoints omitting Gemini models fall through to the next endpoint.
@@ -680,7 +689,7 @@ export class QuotaService {
           break
         }
       } catch {
-        // Try next endpoint on network connection errors
+        this.healthTracker.markFailure(endpoint)
       }
     }
     return partialSummary
@@ -738,6 +747,7 @@ export class QuotaService {
           body: JSON.stringify({}),
         }, proxyUrl)
         if (res.ok) {
+          this.healthTracker.markSuccess(endpoint)
           if (AGY_ENDPOINTS.indexOf(endpoint) === 0) {
             this.preferredEndpointIndex = 0
           }
@@ -747,10 +757,60 @@ export class QuotaService {
           break
         }
       } catch {
-        // Try next endpoint
+        this.healthTracker.markFailure(endpoint)
       }
     }
     return null
+  }
+
+  protected async fetchCodeAssistEndpoint(endpoint: string, accessToken: string, proxyUrl?: string): Promise<Response> {
+    return agyFetch(`${endpoint}/v1internal:loadCodeAssist`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'User-Agent': agyUserAgent(),
+      },
+      body: JSON.stringify({ metadata: { ideType: 'ANTIGRAVITY' } }),
+    }, proxyUrl)
+  }
+
+  /**
+   * Probe subscription tier authoritatively via v1internal:loadCodeAssist (Antigravity-Manager parity).
+   * Request body: {"metadata": {"ideType": "ANTIGRAVITY"}}
+   */
+  async probeSubscriptionTier(accessToken: string, proxyUrl?: string): Promise<'PRO' | 'ULTRA' | 'FREE' | undefined> {
+    const endpoints = this.getOrderedEndpoints()
+    for (let i = 0; i < endpoints.length; i++) {
+      const endpoint = endpoints[i]!
+      try {
+        const res = await this.fetchCodeAssistEndpoint(endpoint, accessToken, proxyUrl)
+
+        if (res.ok) {
+          this.healthTracker.markSuccess(endpoint)
+          const data = (await res.json()) as any
+          const rawId =
+            data?.paidTier?.id ??
+            data?.currentTier?.id ??
+            data?.allowedTiers?.[0]?.id ??
+            data?.paidTier ??
+            data?.currentTier
+          if (rawId) {
+            const s = String(rawId).toUpperCase()
+            if (s.includes('ULTRA')) return 'ULTRA'
+            if (s.includes('PRO')) return 'PRO'
+            return 'FREE'
+          }
+          return 'FREE'
+        }
+        if (res.status === 401 || res.status === 403) {
+          break
+        }
+      } catch {
+        this.healthTracker.markFailure(endpoint)
+      }
+    }
+    return undefined
   }
 
   /**
@@ -876,10 +936,11 @@ export class QuotaService {
       this.pool.resetAccountIdentity(account.id, email)
     }
 
-    const [summary, discovered, userQuota] = await Promise.all([
+    const [summary, discovered, userQuota, probedTier] = await Promise.all([
       this.fetchQuotaSummary(accessToken, this.proxyFor(account)),
       this.fetchAvailableModels(accessToken, this.proxyFor(account)),
       this.fetchUserQuota(accessToken, this.proxyFor(account)).catch(() => null),
+      this.probeSubscriptionTier(accessToken, this.proxyFor(account)),
     ])
 
     // Query the userinfo endpoint ONLY when the email is still unknown.
@@ -927,7 +988,7 @@ export class QuotaService {
     const familyQuotas: Partial<Record<ModelFamily, FamilyQuotaInfo>> = {}
     const stale5hFamilies = new Set<ModelFamily>()
 
-    // 1. Ingest official weekly & 5h limits from retrieveUserQuotaSummary
+    // 1. Ingest official weekly & 5h limits from retrieveUserQuotaSummary using buildQuotaGroupViews
     const summaryGroups: QuotaSummaryGroup[] = []
     if (summary) {
       if (Array.isArray(summary.groups)) summaryGroups.push(...summary.groups)
@@ -938,64 +999,35 @@ export class QuotaService {
         })
       }
     }
-
     if (summaryGroups.length > 0) {
-      for (const group of summaryGroups) {
-        const dName = (group.displayName || '').toLowerCase()
-        const desc = (group.description || '').toLowerCase()
-        // Gemini 4 Argon (Pro/Ultra-only) ships as its OWN quota group with a
-        // separate weekly bucket, but its display name still contains "gemini"
-        // ("Gemini 4 Argon"). Detect argon BEFORE the generic gemini gate or
-        // the group folds into — and overwrites — the plain Gemini family.
-        const hasArgonBucket = Array.isArray(group.buckets) && group.buckets.some((b) => (b.bucketId || '').toLowerCase().includes('argon') || (b.displayName || '').toLowerCase().includes('argon'))
-        const isArgon = dName.includes('argon') || desc.includes('argon') || hasArgonBucket
-        const isGoogle = !isArgon && (dName.includes('gemini') || desc.includes('gemini'))
-        const is3P = dName.includes('claude') || dName.includes('gpt') || desc.includes('claude') || desc.includes('gpt')
-
-        const targetFamilies: ModelFamily[] = isArgon
-          ? ['argon']
-          : isGoogle
-          ? ['google']
-          : is3P
-          ? ['anthropic', 'openai']
-          : []
-
-        let fiveHourFrac: number | undefined
-        let fiveHourReset: string | undefined
-        let weeklyFrac: number | undefined
-        let weeklyReset: string | undefined
-
-        for (const b of group.buckets || []) {
-          const w = (b.window || b.bucketId || '').toLowerCase()
-          // Server fractions are clamped to [0,1] and NaN rejected: a bogus
-          // remainingFraction (NaN/negative/>1) used to flow straight into
-          // isAccountEligible and the UI ("NaN%" rows, permanently ineligible).
-          const frac = typeof b.remainingFraction === 'number' && Number.isFinite(b.remainingFraction)
-            ? Math.min(1, Math.max(0, b.remainingFraction))
-            : undefined
-          if (w.includes('5h') || w.includes('five_hour') || w.includes('5-hour')) {
-            fiveHourFrac = frac
-            fiveHourReset = b.resetTime
-          } else if (w.includes('weekly') || w.includes('week')) {
-            weeklyFrac = frac
-            weeklyReset = b.resetTime
-          }
-        }
-
-        for (const fam of targetFamilies) {
-          if (isStale5hBucket(fiveHourFrac, fiveHourReset, now)) {
+      const views = buildQuotaGroupViews(summaryGroups)
+      for (const view of views) {
+        for (const fam of view.families) {
+          const sharedWith = view.families.filter((f) => f !== fam)
+          // Upstream's stale-5h detection, carried through the shared-pool view:
+          // a coarse summary can report an unmetered 5h placeholder (stale 100%
+          // with a now+5h reset); flag the family so the model path can override.
+          if (isStale5hBucket(view.fiveHour?.fraction, view.fiveHour?.resetTime, now)) {
             stale5hFamilies.add(fam)
           }
           familyQuotas[fam] = {
-            remainingFraction: fiveHourFrac,
-            resetTime: fiveHourReset,
-            weeklyFraction: weeklyFrac,
-            weeklyResetTime: weeklyReset,
-            description: group.description,
+            remainingFraction: view.fiveHour?.fraction,
+            resetTime: view.fiveHour?.resetTime,
+            weeklyFraction: view.weekly?.fraction,
+            weeklyResetTime: view.weekly?.resetTime,
+            description: view.description,
             updatedAt: now,
+            sharedWith: sharedWith.length > 0 ? sharedWith : undefined,
           }
         }
       }
+    }
+
+    // Attach probed or preserved subscription tier (authoritatively from loadCodeAssist)
+    const effectiveTier = probedTier ?? account.quotas?.google?.subscriptionTier
+    if (effectiveTier && familyQuotas.google) {
+      familyQuotas.google.subscriptionTier = effectiveTier
+      familyQuotas.google.tierProbedAt = now
     }
 
     // 2. Ingest detailed model list from fetchAvailableModels / retrieveUserQuota
@@ -1020,6 +1052,7 @@ export class QuotaService {
           displayName: entry.displayName || modelId,
           remainingFraction: remaining,
           resetTime,
+          source: 'model',
         })
 
         const isStale = stale5hFamilies.has(fam)

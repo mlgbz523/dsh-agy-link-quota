@@ -1,7 +1,7 @@
 {
   "name": "dsh-agy-link",
-  "version": "0.4.67",
-  "description": "Google Antigravity (agy CLI) models for DeepSeek Harness — stream Gemini/Claude/GPT-OSS subscriptions into DSH with thinking, tool activity, token usage and in-GUI Google OAuth login.",
+  "version": "0.4.67-quota.1",
+  "description": "Google Antigravity (agy CLI) models for DeepSeek Harness — with Antigravity-Manager-style quota resolution (bottleneck window, shared-pool labeling, subscription tier, endpoint health).",
   "type": "module",
   "license": "MIT",
   "icon": "./assets/icon.svg",
@@ -32,8 +32,8 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/dsh-commands": "*",
     "@deepseek-ai/dsh-client-locale": "*",
+    "@deepseek-ai/dsh-commands": "*",
     "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-tools": "*",
     "react": "^18.0.0"
@@ -68,7 +68,8 @@
     "@types/qrcode": "^1.5.5",
     "tsdown": "^0.22.14",
     "typescript": "^5.9.2",
-    "undici": "^8.10.0"
+    "undici": "^8.10.0",
+    "unrun": "^0.3.1"
   },
   "dsh": {
     "bundle": {
@@ -105,7 +106,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/amlyczz/dsh-agy-link.git"
+    "url": "git+ssh://git@github.com/mlgbz523/dsh-agy-link-quota.git"
   },
   "bugs": {
     "url": "https://github.com/amlyczz/dsh-agy-link/issues"

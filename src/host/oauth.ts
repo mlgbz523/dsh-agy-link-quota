@@ -64,8 +64,8 @@ export const OAUTH_REDIRECT_URI = `http://localhost:${OAUTH_CALLBACK_PORT}${OAUT
 /** Runtime endpoint fallback order (Antigravity endpoint first, then Cloud Code PA fallbacks). */
 export const AGY_ENDPOINTS: readonly string[] = [
   'https://daily-cloudcode-pa.googleapis.com',
-  'https://cloudcode-pa.googleapis.com',
   'https://daily-cloudcode-pa.sandbox.googleapis.com',
+  'https://cloudcode-pa.googleapis.com',
   'https://autopush-cloudcode-pa.sandbox.googleapis.com',
 ]
 

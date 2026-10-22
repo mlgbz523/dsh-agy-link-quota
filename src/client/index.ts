@@ -2,6 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type {} from '@deepseek-ai/dsh-client-locale/client';
 import type { AccountPoolData, FamilyQuotaInfo, ManagedAccount, ModelQuotaInfo } from '../common/pool-types.ts';
+import { resolveEffectiveQuota } from '../common/quota-resolve.ts';
 import { BRAND_COLORS, BRAND_PATHS, UI_PATHS } from './brand-icons.ts';
 import { installAgyToolView } from './toolview.ts';
 import { installMermaidRendering } from './mermaid.ts';
@@ -557,12 +558,12 @@ function installSettingsNavIcon(ctx: ClientContext, resolveLabel: () => string):
 }
 
 /**
- * One family's quota block: brand mark + 5h/weekly bars with reset countdowns
+ * One family's quota block: brand mark + Effective/5h/weekly bars with reset countdowns
  * and cooldown notes. Module-level so the settings section and the Plugins-page
  * dashboard render IDENTICAL quota visuals from one implementation.
  */
 function renderFamilyQuotaBar(
-	t: (key: AgyLocaleKey) => string,
+	t: (key: AgyLocaleKey, params?: Record<string, unknown>) => string,
 	label: string,
 	familyKey: 'google' | 'argon' | 'anthropic' | 'openai',
 	acc: ManagedAccount,
@@ -571,18 +572,14 @@ function renderFamilyQuotaBar(
 	const info = acc.quotas[familyKey];
 	const cd = acc.cooldowns[familyKey];
 	const inCooldown = cd && cd.cooldownUntil > Date.now();
+	const cdNote = inCooldown ? t('account.localCooldown') : '';
+
+	const effective = resolveEffectiveQuota(info);
 
 	// 5-Hour limit
 	const has5h = typeof info?.remainingFraction === 'number' && Number.isFinite(info.remainingFraction);
 	const pct5h = has5h ? Math.max(0, Math.min(100, Math.round(info!.remainingFraction! * 100))) : -1;
-	// Cooldown is a LOCAL heuristic — never overwrite the server-reported
-	// fraction with 0% (a ghost cooldown used to show a 98%-full account as
-	// empty). Surface it as a note next to the reset time instead.
-	const cdNote = inCooldown ? t('account.localCooldown') : '';
 	const w5h = formatQuotaWindow(t, info?.resetTime);
-	// Full-quota rows: the backend keeps the LAST window's resetTime, so
-	// the row would go silently blank. When the time has expired but the
-	// fraction is full, say "已重置" instead — the quota is usable now.
 	const expiredFull5h = w5h.expired && has5h && pct5h >= 100;
 
 	// Weekly limit
@@ -591,7 +588,12 @@ function renderFamilyQuotaBar(
 	const wWeekly = formatQuotaWindow(t, info?.weeklyResetTime);
 	const expiredFullWeekly = wWeekly.expired && hasWeekly && pctWeekly >= 100;
 
-	const getColors = (pct: number) => {
+	// Effective bottleneck calculation
+	const pctEff = effective ? Math.max(0, Math.min(100, Math.round(effective.fraction * 100))) : -1;
+	const isLocked = Boolean(effective?.lock);
+	const wEff = formatQuotaWindow(t, effective?.resetTime);
+
+	const getColors = (pct: number, isLock = false) => {
 		if (pct < 0) {
 			return {
 				bar: 'var(--agy-quota-none-border)',
@@ -600,7 +602,7 @@ function renderFamilyQuotaBar(
 				border: 'var(--agy-quota-none-border)',
 			};
 		}
-		if (pct <= 20) {
+		if (isLock || pct <= 20) {
 			return {
 				bar: 'linear-gradient(90deg, #dc2626, #ef4444)',
 				text: 'var(--agy-quota-low-text)',
@@ -624,19 +626,48 @@ function renderFamilyQuotaBar(
 		};
 	};
 
+	const cEff = getColors(pctEff, isLocked);
 	const c5h = getColors(pct5h);
 	const cWeekly = getColors(pctWeekly);
 
-	const renderLine = (windowName: string, percent: number, c: { bar: string; text: string; bg: string; border: string }, resetStr: string, rawFraction?: number, rawReset?: string) => {
+	const renderLine = (
+		windowName: string,
+		percent: number,
+		c: { bar: string; text: string; bg: string; border: string },
+		resetStr: string,
+		lockBadge?: unknown,
+		isPrimary = false,
+		rawFraction?: number,
+		rawReset?: string,
+	) => {
 		const isShimmer = percent < 0 || isRefreshing;
 		const tooltipText = typeof rawFraction === 'number'
 			? `${(rawFraction * 100).toFixed(1)}% (raw: ${rawFraction})${rawReset ? ` · reset: ${rawReset}` : ''}`
 			: resetStr ? `↻ ${resetStr}` : undefined;
-		return h('div', { style: { display: 'flex', alignItems: 'center', fontSize: '11.5px', margin: '4px 0' } },
-			h('span', { style: { width: '52px', color: 'var(--agy-text-window-label)', fontSize: '11px', fontWeight: 700, flexShrink: 0 } }, windowName),
+		return h('div', {
+			style: {
+				display: 'flex',
+				alignItems: 'center',
+				fontSize: isPrimary ? '12px' : '11px',
+				margin: isPrimary ? '5px 0' : '3px 0',
+				opacity: isPrimary ? 1 : 0.85,
+			},
+		},
+			h('span', {
+				style: {
+					width: isPrimary ? '58px' : '52px',
+					color: isPrimary ? 'var(--agy-text-primary)' : 'var(--agy-text-window-label)',
+					fontSize: isPrimary ? '11.5px' : '10.5px',
+					fontWeight: isPrimary ? 700 : 600,
+					flexShrink: 0,
+				},
+			}, windowName),
 			h('div', {
 				className: isShimmer ? 'agy-shimmer-track' : '',
-				style: S.progressBarBg,
+				style: {
+					...S.progressBarBg,
+					height: isPrimary ? '7px' : '5px',
+				},
 			},
 				h('div', {
 					className: 'agy-progress-fill',
@@ -648,35 +679,126 @@ function renderFamilyQuotaBar(
 					},
 				}),
 			),
-			h('div', { style: { display: 'inline-flex', alignItems: 'center', gap: '8px', minWidth: '140px', justifyContent: 'flex-end', flexShrink: 0 } },
+			h('div', {
+				style: {
+					display: 'inline-flex',
+					alignItems: 'center',
+					gap: '6px',
+					minWidth: isPrimary ? '150px' : '130px',
+					justifyContent: 'flex-end',
+					flexShrink: 0,
+				},
+			},
+				lockBadge ?? null,
 				h('span', {
 					title: tooltipText,
 					style: {
-						padding: '2px 7px',
+						padding: isPrimary ? '2px 7px' : '1px 5px',
 						borderRadius: '4px',
 						background: c.bg,
 						color: c.text,
 						border: `1px solid ${c.border}`,
 						fontWeight: 700,
-						fontSize: '11.5px',
+						fontSize: isPrimary ? '11.5px' : '10.5px',
 						lineHeight: 1.2,
 						cursor: tooltipText ? 'help' : 'default',
 					},
 				}, percent < 0 ? '—' : `${percent}%`),
-				resetStr ? h('span', { style: { color: 'var(--agy-text-secondary)', fontSize: '11px', fontWeight: 500 } }, `↻ ${resetStr}`) : null,
+				resetStr ? h('span', { style: { color: 'var(--agy-text-secondary)', fontSize: isPrimary ? '11px' : '10px', fontWeight: 500 } }, `↻ ${resetStr}`) : null,
 			),
 		);
 	};
 
+	let lockBadge: unknown = null;
+	if (isLocked) {
+		const lockText = effective?.lock === 'weekly_exhausted'
+			? t('quota.locked.weekly')
+			: t('quota.locked.fiveHour');
+		lockBadge = h('span', {
+			style: {
+				padding: '1px 5px',
+				borderRadius: '3px',
+				background: 'var(--agy-quota-low-bg)',
+				color: 'var(--agy-quota-low-text)',
+				border: '1px solid var(--agy-quota-low-border)',
+				fontWeight: 700,
+				fontSize: '10px',
+				display: 'inline-flex',
+				alignItems: 'center',
+				gap: '2px',
+			},
+			title: lockText,
+		}, '🔒 ', lockText);
+	}
+
+	const tierBadge = info?.subscriptionTier ? h('span', {
+		style: {
+			fontSize: '9.5px',
+			fontWeight: 700,
+			padding: '1px 5px',
+			borderRadius: '3px',
+			background: info.subscriptionTier === 'ULTRA' ? 'rgba(168, 85, 247, 0.15)' : info.subscriptionTier === 'PRO' ? 'rgba(59, 130, 246, 0.15)' : 'var(--agy-bg-subbox)',
+			color: info.subscriptionTier === 'ULTRA' ? '#a855f7' : info.subscriptionTier === 'PRO' ? '#3b82f6' : 'var(--agy-text-secondary)',
+			border: `1px solid ${info.subscriptionTier === 'ULTRA' ? 'rgba(168, 85, 247, 0.45)' : info.subscriptionTier === 'PRO' ? 'rgba(59, 130, 246, 0.45)' : 'var(--agy-border-box)'}`,
+		},
+	}, info.subscriptionTier) : null;
+
+	const sharedPoolNotice = (info?.sharedWith && info.sharedWith.length > 0) ? h('div', {
+		style: {
+			display: 'flex',
+			alignItems: 'center',
+			gap: '4px',
+			marginTop: '5px',
+			paddingTop: '4px',
+			borderTop: '1px dashed var(--agy-border-box)',
+			fontSize: '10.5px',
+			color: 'var(--agy-text-secondary)',
+		},
+	},
+		uiIcon('globe', 10, 'var(--agy-text-secondary)'),
+		h('span', null, t('quota.sharedPool', { families: info.sharedWith.join(' / ') })),
+	) : null;
+
 	return h('div', { style: { margin: '6px 0', padding: '8px 10px', background: 'var(--agy-bg-subbox)', borderRadius: '7px', border: '1px solid var(--agy-border-box)' } },
-		h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 700, fontSize: '12.5px', marginBottom: '5px', color: 'var(--agy-text-primary)' } },
-			brandIcon(FAMILY_BRAND[familyKey], 14),
-			h('span', null, label),
+		h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '5px' } },
+			h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 700, fontSize: '12.5px', color: 'var(--agy-text-primary)' } },
+				brandIcon(FAMILY_BRAND[familyKey], 14),
+				h('span', null, label),
+				tierBadge,
+			),
+			isLocked ? h('span', { style: { fontSize: '11px', color: '#ef4444', fontWeight: 700 } }, '🔒') : null,
+		),
+		renderLine(
+			t('quota.effective'),
+			pctEff,
+			cEff,
+			wEff.resetText ? wEff.resetText + cdNote : (wEff.expired && pctEff >= 100) ? t('quota.windowReset') + cdNote : cdNote.replace(/^ · /, ''),
+			lockBadge,
+			true,
 		),
 		// Argon is a WEEKLY-only counter today: render the 5h row only when
 		// the backend actually reports one, never as a permanent "—" ghost.
-		(familyKey !== 'argon' || has5h) ? renderLine(t('quota.fiveHour'), pct5h, c5h, w5h.resetText ? w5h.resetText + cdNote : expiredFull5h ? t('quota.windowReset') + cdNote : cdNote.replace(/^ · /, ''), info?.remainingFraction, info?.resetTime) : null,
-		renderLine(t('quota.weekly'), pctWeekly, cWeekly, wWeekly.resetText ? wWeekly.resetText : expiredFullWeekly ? t('quota.windowReset') : '', info?.weeklyFraction, info?.weeklyResetTime),
+		(familyKey !== 'argon' || has5h) ? renderLine(
+			t('quota.fiveHour'),
+			pct5h,
+			c5h,
+			w5h.resetText ? w5h.resetText + cdNote : expiredFull5h ? t('quota.windowReset') + cdNote : cdNote.replace(/^ · /, ''),
+			undefined,
+			false,
+			info?.remainingFraction,
+			info?.resetTime,
+		) : null,
+		renderLine(
+			t('quota.weekly'),
+			pctWeekly,
+			cWeekly,
+			wWeekly.resetText ? wWeekly.resetText : expiredFullWeekly ? t('quota.windowReset') : '',
+			undefined,
+			false,
+			info?.weeklyFraction,
+			info?.weeklyResetTime,
+		),
+		sharedPoolNotice,
 	);
 }
 
@@ -1742,6 +1864,31 @@ export function apply(ctx: ClientContext): void {
 							},
 							title: acc.email,
 						}, uiIcon('mail', 10, 'var(--agy-badge-email-text)'), acc.email) : null,
+						acc.quotas.google?.subscriptionTier ? h('span', {
+							style: {
+								...S.badgeTag,
+								background: acc.quotas.google.subscriptionTier === 'ULTRA'
+									? 'rgba(168, 85, 247, 0.15)'
+									: acc.quotas.google.subscriptionTier === 'PRO'
+										? 'rgba(59, 130, 246, 0.15)'
+										: 'var(--agy-bg-subbox)',
+								color: acc.quotas.google.subscriptionTier === 'ULTRA'
+									? '#a855f7'
+									: acc.quotas.google.subscriptionTier === 'PRO'
+										? '#3b82f6'
+										: 'var(--agy-text-secondary)',
+								borderColor: acc.quotas.google.subscriptionTier === 'ULTRA'
+									? 'rgba(168, 85, 247, 0.45)'
+									: acc.quotas.google.subscriptionTier === 'PRO'
+										? 'rgba(59, 130, 246, 0.45)'
+										: 'var(--agy-border-box)',
+								gap: '3px',
+								fontSize: '10px',
+								padding: '1px 5px',
+								fontWeight: 700,
+							},
+							title: `Subscription Tier: ${acc.quotas.google.subscriptionTier}`,
+						}, acc.quotas.google.subscriptionTier) : null,
 						isInUse ? h('span', {
 							style: {
 								...S.badgeTag,
@@ -1882,8 +2029,25 @@ h('div', { key: 'agy-body', style: S.quotaBox },
 									const pct = Math.round(frac * 100);
 									const w = formatQuotaWindow(t, model.resetTime);
 									const pColor = pct <= 20 ? 'var(--agy-quota-low-text)' : pct <= 50 ? 'var(--agy-quota-med-text)' : 'var(--agy-quota-high-text)';
+									const caliberTag = model.source === 'summary'
+										? t('quota.caliber.summary')
+										: t('quota.caliber.model');
 									return h('div', { key: `${family}-${model.modelId}`, className: 'agy-submodel-row' },
-										h('span', { style: { fontWeight: 500, color: 'var(--agy-text-primary)' } }, `[${family}] ${model.displayName || model.modelId}`),
+										h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+											h('span', { style: { fontWeight: 500, color: 'var(--agy-text-primary)' } }, `[${family}] ${model.displayName || model.modelId}`),
+											h('span', {
+												style: {
+													fontSize: '9px',
+													padding: '1px 4px',
+													borderRadius: '3px',
+													background: 'var(--agy-bg-subbox)',
+													color: 'var(--agy-text-secondary)',
+													border: '1px solid var(--agy-border-box)',
+													fontWeight: 600,
+												},
+												title: model.source === 'summary' ? t('quota.caliber.summary') : t('quota.caliber.model'),
+											}, caliberTag),
+										),
 										h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
 											h('span', { style: { color: pColor, fontWeight: 700 } }, `${pct}%`),
 											w.resetText ? h('span', { style: { color: 'var(--agy-text-tertiary)', fontSize: '10.5px' } }, `↻ ${w.resetText}`) : null,
@@ -2286,7 +2450,8 @@ h('div', { key: 'agy-body', style: S.quotaBox },
 		// chain can land on a disabled/quarantined slot, and the badge then
 		// claimed a dead account was serving traffic next to an amber dot.
 		const activeEligible = activeAcc !== undefined && activeAcc.enabled && !activeAcc.authRequired;
-		const activeDetail = activeAcc !== undefined && activeEligible ? ` · ${t('status.inUse')}: ${displayAlias}${activeAcc.email ? ` (${activeAcc.email})` : ''}` : '';
+		const tierStr = activeAcc?.quotas?.google?.subscriptionTier ? ` [${activeAcc.quotas.google.subscriptionTier}]` : '';
+		const activeDetail = activeAcc !== undefined && activeEligible ? ` · ${t('status.inUse')}: ${displayAlias}${activeAcc.email ? ` (${activeAcc.email})` : ''}${tierStr}` : '';
 		const badgeTitle = status === null
 			? t('header.badgeLoading')
 			: `${t('header.badgeTitle', { count: accounts.length })}${activeDetail}`;
