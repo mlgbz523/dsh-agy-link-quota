@@ -102,6 +102,7 @@ export function resolveConfig(
     dispatchTimeoutMinutes: asNum(get('dispatchTimeoutMinutes')) ?? base.dispatchTimeoutMinutes,
     dispatchRetries: asNum(get('dispatchRetries')) ?? base.dispatchRetries,
     parallelSameAccount: asBool(get('parallelSameAccount')) ?? base.parallelSameAccount,
+    showHeaderBadge: asBool(get('showHeaderBadge')) ?? base.showHeaderBadge,
     maxConcurrent: asNum(get('maxConcurrent')) ?? base.maxConcurrent,
     contextWindowDefault: asNum(get('contextWindowDefault')) ?? base.contextWindowDefault,
     maxTokensDefault: asNum(get('maxTokensDefault')) ?? base.maxTokensDefault,
@@ -136,6 +137,10 @@ export function resolveConfig(
   }
   // Env wins last (spec ADR-13).
   if (env.DSH_AGY_ENABLED !== undefined) cfg.enabled = asBool(env.DSH_AGY_ENABLED) ?? cfg.enabled
+  if (env.DSH_AGY_HEADER_BADGE !== undefined) {
+    const show = asBool(env.DSH_AGY_HEADER_BADGE)
+    if (show !== undefined) cfg.showHeaderBadge = show
+  }
   if (env.DSH_AGY_BIN) cfg.agyBin = env.DSH_AGY_BIN
   if (env.DSH_AGY_MODE) {
     const m = asMode(env.DSH_AGY_MODE)

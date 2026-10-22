@@ -44,6 +44,13 @@ export interface PluginConfig {
   * exclusive only for account switches (Windows credential slot).
    */
   parallelSameAccount: boolean
+  /**
+   * Show the Antigravity account badge in the chat session header.
+   * Default true. Set false to hide only the header pill while keeping the
+   * provider, its tools, the settings section and `/agy` commands fully
+   * functional — the badge is pure chrome, never a capability switch.
+   */
+  showHeaderBadge: boolean
   maxConcurrent: number
   contextWindowDefault: number
   maxTokensDefault: number
@@ -165,6 +172,8 @@ export function defaultConfig(): PluginConfig {
      * false restores full-run slot exclusivity (one agy process at a time).
      */
     parallelSameAccount: true,
+    /** Header account pill; hiding it never touches the provider itself. */
+    showHeaderBadge: true,
     /**
      * Cross-session cap on concurrent agy request streams. 0 = UNLIMITED
      * (default): native agy concurrency — agy is a stateless CLI and runs

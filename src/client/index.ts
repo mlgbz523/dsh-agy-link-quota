@@ -70,6 +70,7 @@ interface StatusPayload {
 	version?: string | null;
 	dormantReason?: string | null;
 	enabled?: boolean;
+	showHeaderBadge?: boolean;
 	permissionMode?: string;
 	workspaceRoot?: string;
 	defaultModel?: string;
@@ -2312,6 +2313,21 @@ h('div', { key: 'agy-body', style: S.quotaBox },
 							}, t('pool.roundRobin')),
 						),
 					),
+					h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' } },
+						h('span', { style: { color: 'var(--agy-text-primary)', fontWeight: 600, fontSize: '12.5px' } }, t('badge.label')),
+						h('div', { style: S.segGroup },
+							h('button', {
+								type: 'button',
+								style: status?.showHeaderBadge !== false ? S.segBtnActive : S.segBtn,
+								onClick: () => void setCfg('showHeaderBadge', true),
+							}, t('badge.show')),
+							h('button', {
+								type: 'button',
+								style: status?.showHeaderBadge === false ? S.segBtnActive : S.segBtn,
+								onClick: () => void setCfg('showHeaderBadge', false),
+							}, t('badge.hide')),
+						),
+					),
 					h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
 						h('span', { style: { color: 'var(--agy-text-primary)', fontWeight: 600, fontSize: '12.5px' } }, t('models.label')),
 						catalogModels.length === 0
@@ -2426,6 +2442,12 @@ h('div', { key: 'agy-body', style: S.quotaBox },
 			const timer = setInterval(() => setTimeTick((n) => n + 1), 30_000);
 			return () => clearInterval(timer);
 		}, []);
+
+		// Header chrome switch (settings → Antigravity, or DSH_AGY_HEADER_BADGE).
+		// Hiding the pill is pure presentation: the provider, its tools and the
+		// settings section stay registered. Evaluated after every hook so the
+		// hook order never changes between renders.
+		if (status?.showHeaderBadge === false) return null;
 
 		const pool = status?.pool;
 		const accounts = pool?.accounts ?? [];

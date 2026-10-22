@@ -593,6 +593,7 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
           version: versionCache,
           dormantReason,
           enabled: cfg.enabled,
+          showHeaderBadge: cfg.showHeaderBadge,
           permissionMode: cfg.permissionMode,
           workspaceRoot: cfg.workspaceRoot,
           defaultModel: cfg.defaultModel,
@@ -901,9 +902,13 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
         }
         const body = await readBody(req)
         const key = typeof body.key === 'string' ? body.key : ''
-        const allowed = ['permissionMode', 'defaultModel', 'defaultEffort', 'askTool', 'workspaceRoot', 'hiddenModels']
+        const allowed = ['permissionMode', 'defaultModel', 'defaultEffort', 'askTool', 'workspaceRoot', 'hiddenModels', 'showHeaderBadge']
         if (!allowed.includes(key)) {
           sendJson(res as RawRes, 400, { error: 'key not settable' })
+          return
+        }
+        if (key === 'showHeaderBadge' && typeof body.value !== 'boolean') {
+          sendJson(res as RawRes, 400, { error: 'showHeaderBadge must be a boolean' })
           return
         }
         if (key === 'hiddenModels' && (!Array.isArray(body.value) || !(body.value as unknown[]).every((x) => typeof x === 'string'))) {
